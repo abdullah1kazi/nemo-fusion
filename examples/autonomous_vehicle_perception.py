@@ -1,36 +1,17 @@
 """
-Autonomous Vehicle Multi-Modal Perception System
-=================================================
+Autonomous Vehicle Perception: Camera + LiDAR + Radar Fusion
 
-Real-world use case: Combining camera, LiDAR, and radar data for
-autonomous driving perception and decision-making.
+Fuses 6 cameras, LiDAR, and radar for 3D object detection in self-driving cars.
 
-Problem: Self-driving cars need to fuse multiple sensor modalities
-(cameras, LiDAR, radar) to build a comprehensive understanding of
-the environment for safe navigation.
-
-Dataset: nuScenes (simulated data structure)
-- 1,000 scenes (20 seconds each)
-- 40,000 keyframes with annotations
-- 6 cameras (360° coverage)
-- 1 LiDAR (32-beam)
-- 5 radars
-- 1.4M 3D bounding boxes
-- 23 object classes (cars, pedestrians, cyclists, etc.)
-
-Performance Requirements:
-- Model: ~450M parameters (Multi-modal transformer)
-- Training: 16x H100 GPUs (80GB each)
-- Batch size: 32 (2 per GPU)
-- Real-time inference: <100ms latency
-- Sequence length: 256 tokens per modality
+Dataset: nuScenes (1K scenes, 400K samples, 1.4M 3D boxes, 23 classes)
+Model: 450M params (ResNet-50 + PointNet++ + CNN fusion)
+Training: 16x H100 GPUs, ~12 hours, <100ms inference latency
 """
 
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
-from nemo_fusion.parallelism import AutoParallelOptimizer, ModelConfig, HardwareConfig
-from nemo_fusion.multimodal import MultiModalFusion, ModalityConfig
+from nemo_fusion.parallelism import AutoParallelOptimizer
+from nemo_fusion.multimodal import MultiModalFusion
 from nemo_fusion.optimization import MixedPrecisionConfig, CheckpointManager
 from nemo_fusion.profiling import DistributedProfiler
 
@@ -74,13 +55,6 @@ NUSCENES_DATA_STATS = {
 
 
 class AutonomousVehicleModel(nn.Module):
-    """
-    Multi-modal perception model for autonomous driving combining:
-    - Vision: 6 camera images (ResNet-50 backbone)
-    - LiDAR: 3D point cloud (PointNet++ encoder)
-    - Radar: Range-Doppler maps (CNN encoder)
-    """
-
     def __init__(self, camera_dim=2048, lidar_dim=512, radar_dim=256, hidden_dim=1024, num_classes=23):
         super().__init__()
 
@@ -138,7 +112,6 @@ class AutonomousVehicleModel(nn.Module):
         )
 
     def _make_resnet_layer(self, in_channels, out_channels, num_blocks):
-        """Create a ResNet layer with bottleneck blocks."""
         layers = []
         layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=1))
         layers.append(nn.BatchNorm2d(out_channels))
@@ -290,7 +263,7 @@ def profile_inference():
             cameras = torch.randn(2, 6, 3, 900, 1600, device=device)
             lidar = torch.randn(2, 34720, 4, device=device)
             radar = torch.randn(2, 5, 64, 64, device=device)
-            detections = model(cameras, lidar, radar)
+            _ = model(cameras, lidar, radar)
 
             if step % 10 == 0:
                 profiler.record_comp_time(0.055)

@@ -1,33 +1,19 @@
 """
-Medical Multi-Modal Diagnosis System
-=====================================
+Medical Multi-Modal Diagnosis: X-Ray + Clinical Notes
 
-Real-world use case: Combining chest X-ray images with clinical notes
-for pneumonia detection and severity assessment.
+Combines chest X-rays and clinical notes for pneumonia detection.
 
-Problem: Radiologists need to analyze both medical images and patient history
-to make accurate diagnoses. This example shows how NeMo Fusion can combine
-visual and textual modalities for improved diagnostic accuracy.
-
-Dataset: MIMIC-CXR (simulated data structure)
-- 377,110 chest X-ray images
-- 227,835 radiology reports
-- 14 disease labels including pneumonia, edema, atelectasis
-
-Performance Requirements:
-- Model: ~350M parameters (ViT-Base + BioClinicalBERT)
-- Training: 8x A100 GPUs (40GB each)
-- Batch size: 64 (8 per GPU)
-- Sequence length: 512 tokens for clinical notes
-- Image size: 224x224 pixels
+Dataset: MIMIC-CXR (377K X-rays, 227K reports, 14 disease labels)
+Model: 180M params (ViT-Base + BioClinicalBERT + cross-attention)
+Training: 8x A100 GPUs, ~4 hours
 """
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from nemo_fusion.parallelism import AutoParallelOptimizer, ModelConfig, HardwareConfig
-from nemo_fusion.multimodal import MultiModalFusion, ModalityConfig
-from nemo_fusion.optimization import MixedPrecisionConfig, GradientOptimizer
+from nemo_fusion.parallelism import AutoParallelOptimizer
+from nemo_fusion.multimodal import MultiModalFusion
+from nemo_fusion.optimization import MixedPrecisionConfig
 from nemo_fusion.profiling import DistributedProfiler
 
 
@@ -49,12 +35,6 @@ MEDICAL_DATA_STATS = {
 
 
 class MedicalMultiModalModel(nn.Module):
-    """
-    Multi-modal model for medical diagnosis combining:
-    - Vision: Chest X-ray images (ViT-Base encoder)
-    - Text: Clinical notes (BioClinicalBERT encoder)
-    """
-
     def __init__(self, image_dim=768, text_dim=768, hidden_dim=1024, num_classes=14):
         super().__init__()
 
