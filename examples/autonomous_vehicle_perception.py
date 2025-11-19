@@ -169,52 +169,34 @@ class AutonomousVehicleModel(nn.Module):
         return detections.view(-1, NUSCENES_DATA_STATS["annotations"]["object_classes"], 7)
 
 
-def calculate_model_size():
-    """Calculate total model parameters."""
+def calc_model_size():
     model = AutonomousVehicleModel()
     total_params = sum(p.numel() for p in model.parameters())
 
     print(f"\n📊 Model Architecture:")
-    print(f"   Camera Encoders (6x ResNet-50): ~150M params")
-    print(f"   LiDAR Encoder (PointNet++): ~5M params")
-    print(f"   Radar Encoder (CNN): ~2M params")
-    print(f"   Fusion + Detection Head: ~{(total_params - 157_000_000) / 1_000_000:.0f}M params")
+    print(f"   6x Camera (ResNet-50): ~150M params")
+    print(f"   LiDAR (PointNet++): ~5M params")
+    print(f"   Radar (CNN): ~2M params")
+    print(f"   Fusion + Detection: ~{(total_params - 157_000_000) / 1_000_000:.0f}M params")
     print(f"   Total: {total_params / 1_000_000:.0f}M parameters")
-    print(f"   Model size (FP32): {total_params * 4 / 1e9:.2f} GB")
-    print(f"   Model size (FP8): {total_params / 1e9:.2f} GB")
+    print(f"   Size (FP32): {total_params * 4 / 1e9:.2f} GB")
+    print(f"   Size (FP8): {total_params / 1e9:.2f} GB")
 
     return total_params
 
 
-def optimize_parallelism_strategy():
-    """Find optimal parallelism strategy for autonomous vehicle training."""
-    print("\n🔧 Optimizing Parallelism Strategy for Autonomous Vehicle Training\n")
+def optimize_parallelism():
+    print("\n🔧 Optimizing Parallelism Strategy\n")
 
-    total_params = calculate_model_size()
+    total_params = calc_model_size()
 
-    hw_config = HardwareConfig(
-        num_gpus=16,
-        gpu_memory_gb=80,
-        gpu_type="H100",
-        interconnect="NVLink"
-    )
-
-    model_config = ModelConfig(
+    optimizer = AutoParallelOptimizer(verbose=True)
+    strategy = optimizer.optimize(
         num_params=total_params,
         num_layers=50,
         hidden_size=1024,
-        num_attention_heads=16,
-        sequence_length=256,
-    )
-
-    optimizer = AutoParallelOptimizer(verbose=True)
-
-    strategy = optimizer.optimize(
-        num_params=model_config.num_params,
-        num_layers=model_config.num_layers,
-        hidden_size=model_config.hidden_size,
-        num_gpus=hw_config.num_gpus,
-        gpu_memory_gb=hw_config.gpu_memory_gb,
+        num_gpus=16,
+        gpu_memory_gb=80,
         batch_size=2,
         sequence_length=256,
         num_attention_heads=16,
@@ -226,99 +208,81 @@ def optimize_parallelism_strategy():
     for key, value in strategy.to_nemo_config().items():
         print(f"   {key}: {value}")
 
-    print(f"\n🔄 Alternative Strategies:")
+    print(f"\n🔄 Alternatives:")
     for i, alt in enumerate(optimizer.get_top_strategies(3)[1:], 1):
         print(f"   {i}. {alt}")
 
     return strategy
 
 
-def estimate_training_metrics(strategy):
-    """Estimate training time and inference latency."""
-    print("\n⏱️  Training & Inference Metrics:")
+def estimate_metrics(strategy):
+    print("\n⏱️  Training & Inference:")
 
     total_samples = NUSCENES_DATA_STATS["total_samples"]
-    batch_size_global = 32
+    batch_size = 32
     epochs = 50
-
-    steps_per_epoch = total_samples // batch_size_global
+    steps_per_epoch = total_samples // batch_size
     total_steps = steps_per_epoch * epochs
-
     throughput = strategy.expected_throughput / 256
-    training_time_hours = (total_steps * batch_size_global) / (throughput * 3600)
+    training_hours = (total_steps * batch_size) / (throughput * 3600)
 
     print(f"\n   📈 Training:")
-    print(f"      Total samples: {total_samples:,}")
-    print(f"      Global batch size: {batch_size_global}")
+    print(f"      Samples: {total_samples:,}")
+    print(f"      Batch size: {batch_size}")
     print(f"      Epochs: {epochs}")
-    print(f"      Steps per epoch: {steps_per_epoch:,}")
-    print(f"      Total training steps: {total_steps:,}")
-    print(f"      Estimated throughput: {throughput:.1f} samples/sec")
-    print(f"      Estimated training time: {training_time_hours:.1f} hours ({training_time_hours/24:.1f} days)")
+    print(f"      Steps/epoch: {steps_per_epoch:,}")
+    print(f"      Total steps: {total_steps:,}")
+    print(f"      Throughput: {throughput:.1f} samples/sec")
+    print(f"      Time: {training_hours:.1f} hours ({training_hours/24:.1f} days)")
+    print(f"      Cost (2x AWS p5.48xlarge): ${training_hours * 196.64:,.2f}")
 
-    cost_per_hour = 196.64
-    total_cost = training_time_hours * cost_per_hour
-    print(f"      Estimated cloud cost (2x AWS p5.48xlarge): ${total_cost:,.2f}")
-
-    print(f"\n   🚗 Inference (Real-time Requirements):")
-    print(f"      Target latency: <100ms per frame")
+    print(f"\n   🚗 Inference:")
+    print(f"      Target: <100ms latency")
     print(f"      Camera FPS: {NUSCENES_DATA_STATS['cameras']['fps']}")
-    print(f"      LiDAR frequency: {NUSCENES_DATA_STATS['lidar']['frequency']}")
-    print(f"      Required throughput: ~20 FPS")
-    print(f"      Deployment: Single H100 GPU")
-    print(f"      Expected latency with FP8: ~45-60ms ✅")
-    print(f"      Safety margin: 40-55ms")
+    print(f"      LiDAR: {NUSCENES_DATA_STATS['lidar']['frequency']}")
+    print(f"      Deployment: Single H100")
+    print(f"      Expected (FP8): ~45-60ms ✅")
 
 
-def setup_fp8_precision():
-    """Configure FP8 precision for H100 GPUs (critical for AV inference)."""
-    print("\n🎯 FP8 Mixed Precision Configuration (H100):")
+def setup_precision():
+    print("\n🎯 FP8 Precision (H100):")
 
-    precision_config = MixedPrecisionConfig.for_h100()
-
-    print(f"   Precision: {precision_config.precision.value}")
-    print(f"   Master weights dtype: {precision_config.master_weights_dtype}")
-    print(f"   FP8 margin: {precision_config.fp8_margin}")
-    print(f"   FP8 amax history: {precision_config.fp8_amax_history_len}")
-    print(f"   Memory savings: ~75% vs FP32")
-    print(f"   Expected speedup: ~2-2.5x on H100")
-    print(f"   Inference latency reduction: ~40%")
-
-    return precision_config
+    config = MixedPrecisionConfig.for_h100()
+    print(f"   Precision: {config.precision.value}")
+    print(f"   Memory savings: ~75%")
+    print(f"   Speedup: ~2-2.5x")
+    print(f"   Latency reduction: ~40%")
+    return config
 
 
-def setup_checkpoint_strategy():
-    """Configure checkpoint strategy for long training runs."""
-    print("\n💾 Checkpoint Strategy:")
+def setup_checkpoints():
+    print("\n💾 Checkpoints:")
 
-    checkpoint_config = CheckpointManager(
+    config = CheckpointManager(
         checkpoint_dir="./checkpoints/autonomous_vehicle",
         save_interval=1000,
         keep_last_n=5,
     )
+    print(f"   Directory: {config.checkpoint_dir}")
+    print(f"   Interval: {config.save_interval} steps")
+    print(f"   Keep: {config.keep_last_n}")
+    print(f"   Size: ~1.8 GB (FP8)")
+    print(f"   Storage: ~9 GB")
 
-    print(f"   Checkpoint directory: {checkpoint_config.checkpoint_dir}")
-    print(f"   Save interval: {checkpoint_config.save_interval} steps")
-    print(f"   Keep last N: {checkpoint_config.keep_last_n}")
-    print(f"   Estimated checkpoint size: ~1.8 GB (FP8)")
-    print(f"   Total storage needed: ~9 GB")
 
-
-def simulate_inference_profiling():
-    """Simulate inference with profiling for latency analysis."""
-    print("\n📊 Profiling Inference Performance:")
+def profile_inference():
+    print("\n📊 Profiling Inference:")
 
     if not torch.cuda.is_available():
-        print("   ⚠️  CUDA not available. Skipping profiling demo.")
+        print("   ⚠️  CUDA not available. Skipping.")
         return
 
     device = torch.device("cuda")
     model = AutonomousVehicleModel().to(device)
     model.eval()
-
     profiler = DistributedProfiler(enable_detailed_profiling=True)
 
-    print("   Running 50 inference steps with profiling...")
+    print("   Running 50 inference steps...")
 
     profiler.start()
     with torch.no_grad():
@@ -326,66 +290,52 @@ def simulate_inference_profiling():
             cameras = torch.randn(2, 6, 3, 900, 1600, device=device)
             lidar = torch.randn(2, 34720, 4, device=device)
             radar = torch.randn(2, 5, 64, 64, device=device)
-
             detections = model(cameras, lidar, radar)
 
             if step % 10 == 0:
                 profiler.record_comp_time(0.055)
                 profiler.record_gpu_util(0.92)
-                if torch.cuda.is_available():
-                    mem_used = torch.cuda.memory_allocated(device)
-                    mem_total = torch.cuda.get_device_properties(device).total_memory
-                    profiler.record_mem_usage(mem_used / mem_total)
+                mem_used = torch.cuda.memory_allocated(device)
+                mem_total = torch.cuda.get_device_properties(device).total_memory
+                profiler.record_mem_usage(mem_used / mem_total)
 
     profiler.stop()
-
     report = profiler.analyze()
-    print(f"\n   Overall Efficiency: {report.overall_efficiency:.1%}")
+
+    print(f"\n   Efficiency: {report.overall_efficiency:.1%}")
     print(f"   GPU Utilization: {report.gpu_utilization_avg:.1%}")
-    print(f"   Average latency: ~55ms ✅ (meets <100ms requirement)")
+    print(f"   Latency: ~55ms ✅")
 
     if report.bottlenecks:
-        print(f"\n   ⚠️  Detected Bottlenecks:")
-        for bottleneck in report.bottlenecks[:2]:
-            print(f"      - {bottleneck.type.value}: {bottleneck.description}")
+        print(f"\n   ⚠️  Bottlenecks:")
+        for b in report.bottlenecks[:2]:
+            print(f"      - {b.type.value}: {b.description}")
 
 
 def main():
     print("=" * 80)
-    print("Autonomous Vehicle Multi-Modal Perception System")
-    print("Camera + LiDAR + Radar Fusion for 3D Object Detection")
+    print("Autonomous Vehicle: Camera + LiDAR + Radar Fusion")
     print("=" * 80)
 
-    print(f"\n📁 Dataset: nuScenes")
+    print(f"\n📁 nuScenes Dataset:")
     print(f"   Scenes: {NUSCENES_DATA_STATS['total_scenes']:,}")
     print(f"   Keyframes: {NUSCENES_DATA_STATS['total_keyframes']:,}")
-    print(f"   Total samples: {NUSCENES_DATA_STATS['total_samples']:,}")
+    print(f"   Samples: {NUSCENES_DATA_STATS['total_samples']:,}")
     print(f"   Cameras: {NUSCENES_DATA_STATS['cameras']['count']} ({NUSCENES_DATA_STATS['cameras']['fov']})")
-    print(f"   LiDAR: {NUSCENES_DATA_STATS['lidar']['beams']}-beam, {NUSCENES_DATA_STATS['lidar']['range']} range")
-    print(f"   Radars: {NUSCENES_DATA_STATS['radar']['count']}, {NUSCENES_DATA_STATS['radar']['range']} range")
-    print(f"   3D Annotations: {NUSCENES_DATA_STATS['annotations']['3d_boxes']:,} boxes")
-    print(f"   Object classes: {NUSCENES_DATA_STATS['annotations']['object_classes']}")
+    print(f"   LiDAR: {NUSCENES_DATA_STATS['lidar']['beams']}-beam")
+    print(f"   Radars: {NUSCENES_DATA_STATS['radar']['count']}")
+    print(f"   3D Boxes: {NUSCENES_DATA_STATS['annotations']['3d_boxes']:,}")
+    print(f"   Classes: {NUSCENES_DATA_STATS['annotations']['object_classes']}")
 
-    strategy = optimize_parallelism_strategy()
-    estimate_training_metrics(strategy)
-    setup_fp8_precision()
-    setup_checkpoint_strategy()
-    simulate_inference_profiling()
+    strategy = optimize_parallelism()
+    estimate_metrics(strategy)
+    setup_precision()
+    setup_checkpoints()
+    profile_inference()
 
     print("\n" + "=" * 80)
-    print("✅ Analysis Complete!")
+    print("✅ Complete")
     print("=" * 80)
-    print("\n💡 Key Takeaways:")
-    print("   1. Multi-modal fusion (camera+LiDAR+radar) improves detection by 15-20%")
-    print("   2. FP8 precision on H100 enables real-time inference (<100ms latency)")
-    print("   3. Optimal parallelism reduces training time from weeks to days")
-    print("   4. 16x H100 GPUs can train production model in ~3-4 days")
-    print("   5. Single H100 GPU sufficient for real-time deployment")
-    print("\n📚 References:")
-    print("   - nuScenes Dataset: https://www.nuscenes.org/")
-    print("   - Multi-Modal Fusion: https://arxiv.org/abs/2008.05711")
-    print("   - PointNet++: https://arxiv.org/abs/1706.02413")
-    print("   - FP8 Training: https://arxiv.org/abs/2209.05433")
 
 
 if __name__ == "__main__":

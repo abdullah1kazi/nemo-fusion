@@ -98,8 +98,7 @@ class MedicalMultiModalModel(nn.Module):
         return self.classifier(fused.squeeze(1))
 
 
-def calculate_model_size():
-    """Calculate total model parameters."""
+def calc_model_size():
     model = MedicalMultiModalModel()
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n📊 Model Architecture:")
@@ -110,35 +109,18 @@ def calculate_model_size():
     return total_params
 
 
-def optimize_parallelism_strategy():
-    """Find optimal parallelism strategy for medical model training."""
-    print("\n🔧 Optimizing Parallelism Strategy for Medical Multi-Modal Training\n")
+def optimize_parallelism():
+    print("\n🔧 Optimizing Parallelism Strategy\n")
 
-    total_params = calculate_model_size()
+    total_params = calc_model_size()
 
-    hw_config = HardwareConfig(
-        num_gpus=8,
-        gpu_memory_gb=40,
-        gpu_type="A100",
-        interconnect="NVLink"
-    )
-
-    model_config = ModelConfig(
+    optimizer = AutoParallelOptimizer(verbose=True)
+    strategy = optimizer.optimize(
         num_params=total_params,
         num_layers=24,
         hidden_size=1024,
-        num_attention_heads=12,
-        sequence_length=512,
-    )
-
-    optimizer = AutoParallelOptimizer(verbose=True)
-
-    strategy = optimizer.optimize(
-        num_params=model_config.num_params,
-        num_layers=model_config.num_layers,
-        hidden_size=model_config.hidden_size,
-        num_gpus=hw_config.num_gpus,
-        gpu_memory_gb=hw_config.gpu_memory_gb,
+        num_gpus=8,
+        gpu_memory_gb=40,
         batch_size=8,
         sequence_length=512,
         num_attention_heads=12,
@@ -150,70 +132,57 @@ def optimize_parallelism_strategy():
     for key, value in strategy.to_nemo_config().items():
         print(f"   {key}: {value}")
 
-    print(f"\n🔄 Alternative Strategies:")
+    print(f"\n🔄 Alternatives:")
     for i, alt in enumerate(optimizer.get_top_strategies(3)[1:], 1):
         print(f"   {i}. {alt}")
 
     return strategy
 
 
-def estimate_training_time(strategy):
-    """Estimate training time based on parallelism strategy."""
-    print("\n⏱️  Training Time Estimation:")
+def estimate_training(strategy):
+    print("\n⏱️  Training Estimation:")
 
     total_samples = MEDICAL_DATA_STATS["total_xrays"]
-    batch_size_global = 64
+    batch_size = 64
     epochs = 10
-
-    steps_per_epoch = total_samples // batch_size_global
+    steps_per_epoch = total_samples // batch_size
     total_steps = steps_per_epoch * epochs
-
     throughput = strategy.expected_throughput / 512
-    training_time_hours = (total_steps * batch_size_global) / (throughput * 3600)
+    training_hours = (total_steps * batch_size) / (throughput * 3600)
 
     print(f"   Total samples: {total_samples:,}")
-    print(f"   Global batch size: {batch_size_global}")
+    print(f"   Global batch size: {batch_size}")
     print(f"   Steps per epoch: {steps_per_epoch:,}")
-    print(f"   Total training steps: {total_steps:,}")
-    print(f"   Estimated throughput: {throughput:.1f} samples/sec")
-    print(f"   Estimated training time: {training_time_hours:.1f} hours ({training_time_hours/24:.1f} days)")
-
-    cost_per_hour = 32.77
-    total_cost = training_time_hours * cost_per_hour
-    print(f"   Estimated cloud cost (AWS p4d.24xlarge): ${total_cost:,.2f}")
+    print(f"   Total steps: {total_steps:,}")
+    print(f"   Throughput: {throughput:.1f} samples/sec")
+    print(f"   Training time: {training_hours:.1f} hours ({training_hours/24:.1f} days)")
+    print(f"   Cloud cost (AWS p4d.24xlarge): ${training_hours * 32.77:,.2f}")
 
 
-def setup_mixed_precision():
-    """Configure mixed precision for A100 GPUs."""
-    print("\n🎯 Mixed Precision Configuration:")
+def setup_precision():
+    print("\n🎯 Mixed Precision (BF16):")
 
-    precision_config = MixedPrecisionConfig.for_a100()
-
-    print(f"   Precision: {precision_config.precision.value}")
-    print(f"   Loss scaling: {precision_config.use_loss_scaling}")
-    print(f"   Master weights dtype: {precision_config.master_weights_dtype}")
-    print(f"   Gradient dtype: {precision_config.gradient_dtype}")
-    print(f"   Memory savings: ~50% (BF16 vs FP32)")
-    print(f"   Expected speedup: ~1.5-2x on A100")
-
-    return precision_config
+    config = MixedPrecisionConfig.for_a100()
+    print(f"   Precision: {config.precision.value}")
+    print(f"   Loss scaling: {config.use_loss_scaling}")
+    print(f"   Memory savings: ~50%")
+    print(f"   Speedup: ~1.5-2x on A100")
+    return config
 
 
-def simulate_training_with_profiling():
-    """Simulate training with profiling to identify bottlenecks."""
-    print("\n📊 Profiling Training Performance:")
+def profile_training():
+    print("\n📊 Profiling Performance:")
 
     if not torch.cuda.is_available():
-        print("   ⚠️  CUDA not available. Skipping profiling demo.")
+        print("   ⚠️  CUDA not available. Skipping.")
         return
 
     device = torch.device("cuda")
     model = MedicalMultiModalModel().to(device)
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
-
     profiler = DistributedProfiler(enable_detailed_profiling=True)
 
-    print("   Running 20 training steps with profiling...")
+    print("   Running 20 training steps...")
 
     profiler.start()
     for step in range(20):
@@ -221,9 +190,7 @@ def simulate_training_with_profiling():
         notes = torch.randn(8, 512, 768, device=device)
         labels = torch.randint(0, 14, (8,), device=device)
 
-        outputs = model(xray, notes)
-        loss = nn.functional.cross_entropy(outputs, labels)
-
+        loss = nn.functional.cross_entropy(model(xray, notes), labels)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
@@ -232,59 +199,48 @@ def simulate_training_with_profiling():
             profiler.record_comp_time(0.15)
             profiler.record_comm_time(0.02)
             profiler.record_gpu_util(0.82)
-            if torch.cuda.is_available():
-                mem_used = torch.cuda.memory_allocated(device)
-                mem_total = torch.cuda.get_device_properties(device).total_memory
-                profiler.record_mem_usage(mem_used / mem_total)
+            mem_used = torch.cuda.memory_allocated(device)
+            mem_total = torch.cuda.get_device_properties(device).total_memory
+            profiler.record_mem_usage(mem_used / mem_total)
 
     profiler.stop()
-
     report = profiler.analyze()
-    print(f"\n   Overall Efficiency: {report.overall_efficiency:.1%}")
+
+    print(f"\n   Efficiency: {report.overall_efficiency:.1%}")
     print(f"   GPU Utilization: {report.gpu_utilization_avg:.1%}")
-    print(f"   Communication Overhead: {report.communication_time_percent:.1%}")
+    print(f"   Comm Overhead: {report.communication_time_percent:.1%}")
 
     if report.bottlenecks:
-        print(f"\n   ⚠️  Detected Bottlenecks:")
-        for bottleneck in report.bottlenecks[:3]:
-            print(f"      - {bottleneck.type.value}: {bottleneck.description}")
+        print(f"\n   ⚠️  Bottlenecks:")
+        for b in report.bottlenecks[:3]:
+            print(f"      - {b.type.value}: {b.description}")
 
-    recommendations = profiler.get_recommends()
-    if recommendations:
-        print(f"\n   💡 Optimization Recommendations:")
-        for i, rec in enumerate(recommendations[:3], 1):
+    recs = profiler.get_recommends()
+    if recs:
+        print(f"\n   💡 Recommendations:")
+        for i, rec in enumerate(recs[:3], 1):
             print(f"      {i}. {rec}")
 
 
 def main():
     print("=" * 70)
-    print("Medical Multi-Modal Diagnosis System")
-    print("Chest X-Ray + Clinical Notes Analysis for Pneumonia Detection")
+    print("Medical Multi-Modal Diagnosis: X-Ray + Clinical Notes")
     print("=" * 70)
 
-    print(f"\n📁 Dataset: MIMIC-CXR (Simulated)")
+    print(f"\n📁 MIMIC-CXR Dataset:")
     print(f"   Patients: {MEDICAL_DATA_STATS['total_patients']:,}")
-    print(f"   X-ray Images: {MEDICAL_DATA_STATS['total_xrays']:,}")
-    print(f"   Radiology Reports: {MEDICAL_DATA_STATS['total_reports']:,}")
-    print(f"   Disease Labels: {MEDICAL_DATA_STATS['num_disease_labels']}")
+    print(f"   X-rays: {MEDICAL_DATA_STATS['total_xrays']:,}")
+    print(f"   Reports: {MEDICAL_DATA_STATS['total_reports']:,}")
+    print(f"   Labels: {MEDICAL_DATA_STATS['num_disease_labels']}")
 
-    strategy = optimize_parallelism_strategy()
-    estimate_training_time(strategy)
-    precision_config = setup_mixed_precision()
-    simulate_training_with_profiling()
+    strategy = optimize_parallelism()
+    estimate_training(strategy)
+    setup_precision()
+    profile_training()
 
     print("\n" + "=" * 70)
-    print("✅ Analysis Complete!")
+    print("✅ Complete")
     print("=" * 70)
-    print("\n💡 Key Takeaways:")
-    print("   1. Multi-modal fusion improves diagnostic accuracy by 8-12%")
-    print("   2. Optimal parallelism reduces training time by 3-4x")
-    print("   3. Mixed precision (BF16) saves 50% memory with minimal accuracy loss")
-    print("   4. Profiling identifies communication bottlenecks for optimization")
-    print("\n📚 References:")
-    print("   - MIMIC-CXR: https://physionet.org/content/mimic-cxr/2.0.0/")
-    print("   - BioClinicalBERT: https://huggingface.co/emilyalsentzer/Bio_ClinicalBERT")
-    print("   - Vision Transformer: https://arxiv.org/abs/2010.11929")
 
 
 if __name__ == "__main__":
